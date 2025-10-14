@@ -104,6 +104,7 @@ docker compose run client <server_host> <server_port> <url_path> <directory>
 ![Downloading an image](images/docker-run.png)
 
 When you run the command, the client connects to the server and downloads the file. Example output:
+
 ![Downloaded image](images/download.png)
 
 Any downloaded file will appear in: ./content/downloads
@@ -123,10 +124,13 @@ The directory `/app/content/files` (served by the server) contains:
 - `/files/` — other test files used for client downloads
 
 If you just want to see the listing, access this link: http://localhost:8000/
+
 ![Directory listing](images/directory-listing.png)
-When accessing a directory without an index.html,
-the server dynamically generates a listing.
+
+When accessing a directory without an index.html, the server dynamically generates a listing.
  Example: ```http://localhost:8000/files/docs/```
+
+
 ![Directory listing](images/listing.png)
 
 ## 7. Browsing a Friend’s Server
@@ -135,6 +139,8 @@ For this part of the lab:
 2. Get your friend’s IP address using: ipconfig
 3. Look for "IPv4 Address"
 ![Addresses](images/ipconfig.png)
+
 4. Access their server via: http://<friend_IP>:8000
 ![web server](images/other-web_server.png)
+
 5. Use your client to download files: docker compose run clien  <friend_IP> <friend_port> /docs/CaesarCipher.pdf downloads
