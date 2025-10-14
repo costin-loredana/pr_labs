@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: web_server
+    ports:
+      - "8000:8000"
+    networks:
+      - webnet
+    command: python file_server.py /app/content
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: web_client
+    depends_on:
+      - server
+    networks:
+      - webnet
+    volumes:
+      - ./content/downloads:/downloads
+    stdin_open: true
+    tty: true
+    entrypoint: ["python", "client.py"]
+
+
+networks:
+  webnet:
+    driver: bridge

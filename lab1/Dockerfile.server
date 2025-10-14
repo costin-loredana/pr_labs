@@ -1,0 +1,8 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY file_server.py .  
+COPY content /app/content
+
+EXPOSE 8000
+CMD ["python", "file_server.py", "/app/content/files"]

@@ -1,0 +1,27 @@
+# .dockerignore
+# ----------------------
+# Ignore Git repo and configs
+.git
+.gitignore
+
+# Ignore IDE/editor settings
+.vscode
+.idea
+
+# Ignore Python cache and logs
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Ignore local downloads (client output)
+downloads/
+
+# Ignore Docker metadata
+Dockerfile*
+docker-compose.yml
+
+# Ignore OS junk
+.DS_Store
+Thumbs.db
