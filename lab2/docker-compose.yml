@@ -1,0 +1,27 @@
+version: '3.9'
+
+services:
+  server:
+    container_name: multithreaded_server
+    build:
+      context: .
+    command: python web-server.py files
+    ports:
+      - "8000:8000"
+    networks:
+      - labnet
+    volumes:
+      - ./files:/app/files
+
+  client:
+    container_name: client
+    build:
+      context: .
+    networks:
+      - labnet
+    depends_on:
+      - server
+    entrypoint: ["sleep", "infinity"] 
+
+networks:
+  labnet:
