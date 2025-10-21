@@ -91,7 +91,7 @@ Therefore, for high-load or real-time systems, a threaded or asynchronous approa
 with counter_lock:
     request_counts[path] = request_counts.get(path, 0) + 1
 ```
-![counter-example](images/single-thread.png)
+![counter-example](images/counter-ex.png)
 
 ## 6. Rate limiting
 
