@@ -2,7 +2,6 @@ import socket
 import os
 import mimetypes
 import sys
-from datetime import datetime
 from email.utils import formatdate
 
 if len(sys.argv) != 2:
@@ -55,22 +54,28 @@ def generate_directory_listing(path, request_path):
         f"<h2>Directory listing for {request_path}</h2>",
         "<ul>"
     ]
-    if request_path != "/":
+
+    if request_path not in ("", "/"):
         parent = os.path.dirname(request_path.rstrip("/"))
-        if not parent:
+        if not parent.startswith("/"):
+            parent = "/" + parent
+        if parent == "":
             parent = "/"
-        html.append(f'<li><a href="{parent}/">.. (parent directory)</a></li>')
+        html.append(f'<li><a href="{parent}">.. (parent directory)</a></li>')
 
     for entry in entries:
         full_path = os.path.join(path, entry)
         display_name = entry + "/" if os.path.isdir(full_path) else entry
         link = os.path.join(request_path, entry).replace("\\", "/")
+        if not link.startswith("/"):
+            link = "/" + link
         if os.path.isdir(full_path):
-            link += "/"
+            link = link.rstrip("/") + "/"
         html.append(f'<li><a href="{link}">{display_name}</a></li>')
 
     html.append("</ul></body></html>")
     return "\n".join(html).encode("utf-8")
+
 
 
 while True:
@@ -83,7 +88,6 @@ while True:
             conn.close()
             continue
 
-        # DEBUG: Print the first line of the request
         if request.splitlines():
             print(f"Request: {request.splitlines()[0]}")
 
@@ -102,6 +106,7 @@ while True:
             conn.sendall(b"Method Not Allowed")
             conn.close()
             continue
+        #time.sleep(1) ######
 
         safe_path = os.path.realpath(os.path.join(serve_dir, path.lstrip('/')))
         
@@ -119,7 +124,8 @@ while True:
         if os.path.isdir(safe_path):
             index_path = os.path.join(safe_path, "index.html")
             print(f"Directory detected, checking for index: '{index_path}'")
-            if os.path.isfile(index_path):
+
+            if os.path.isfile(index_path) and not path.startswith("/downloads"):
                 safe_path = index_path
                 print(f"Using index file: '{safe_path}'")
             else:
