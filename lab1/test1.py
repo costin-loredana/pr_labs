@@ -2,11 +2,11 @@ import requests
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-URL = "http://127.0.0.1:8000"  # Change if needed
+URL = "http://127.0.0.1:8000"  
 
 def make_request(i):
     try:
-        r = requests.get(URL, timeout=3)
+        r = requests.get(URL, timeout=15)
         return f"Request {i} completed with status {r.status_code}"
     except Exception as e:
         return f"Request {i} failed: {type(e).__name__}"

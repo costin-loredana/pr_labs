@@ -63,7 +63,7 @@ I built the Docker image that contains the multithreaded server code and defined
 
 ### Single threads
 
-![single-threaded-test](images/single-thread.png)
+![single-threaded-test](images/test1.png)
 
 Observations:
 1. The single-threaded server processes one request at a time. Others must wait for the socket to be free.
