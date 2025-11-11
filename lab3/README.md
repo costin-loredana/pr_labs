@@ -122,23 +122,6 @@ await run_simulation(filename, players=4, tries=200)
 - Atomic change grouping (pair removal = single change)
 - Doesn't block other commands
 
-## Architecture Quality
-
-### SFB (Safe from Bugs)
-- Comprehensive invariant checking
-- Type-safe implementations  
-- Concurrent access patterns tested
-- No race conditions in state transitions
-
-### ETU (Easy to Understand)
-- Simple glue code in commands.py (2-3 lines)
-- Clear separation between rules and infrastructure
-- Well-documented state transitions
-
-### RFC (Ready for Change)
-- Modular design with clear interfaces
-- Extensible scheduler and transformation systems
-- Board operations separated from HTTP layer
 
 ## Testing Strategy
 
