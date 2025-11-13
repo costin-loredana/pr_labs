@@ -4,9 +4,9 @@ import time
 
 HOST = 'localhost'
 PORT = 8000
-PATH = '/'  # or /site_pages/test.html if that file exists
+PATH = '/' 
 NUM_REQUESTS = 10
-VERBOSE = True  # Set False to suppress per-request logs
+VERBOSE = True 
 
 def make_request(index):
     try:
@@ -15,7 +15,6 @@ def make_request(index):
             request = f"GET {PATH} HTTP/1.1\r\nHost: {HOST}\r\nConnection: close\r\n\r\n"
             sock.sendall(request.encode('utf-8'))
 
-            # Read full response
             while True:
                 data = sock.recv(4096)
                 if not data:

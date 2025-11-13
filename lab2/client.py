@@ -3,7 +3,7 @@ import socket
 import time
 import sys
 
-HOST = 'localhost'  
+HOST = 'server'  
 PORT = 8000
 PATH = '/docs'
 NUM_REQUESTS = 100

@@ -1,50 +1,55 @@
-# src/server.py
 import sys
 import os
-from flask import Flask, Response, send_from_directory, request
 from http import HTTPStatus
-import asyncio
+
+from flask import Flask, Response, send_from_directory
+
 from src.board import Board
-from src.commands import look, flip, map as map_command
-from src.commands import watch as watch_command
+from src.commands import look, flip, map as map_command, watch
 
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PUBLIC_DIR = os.path.join(ROOT_DIR, "public")
 
 app = Flask(__name__, static_folder=PUBLIC_DIR)
-board = None
 
+board: Board | None = None
 
-# ----------------------------------------------------------
-# Endpoints asincrone — folosesc doar commands.py
-# ----------------------------------------------------------
 
 @app.route("/look/<player_id>")
 async def look_endpoint(player_id: str):
-    """Returnează vizualizarea tablei pentru jucător."""
+    """
+    Returneaza starea vizibila a tablei pentru player-ul dat.
+    NU asteapta, doar citeste.
+    """
     try:
         result = await look(board, player_id)
         return Response(result, status=HTTPStatus.OK, mimetype="text/plain")
     except Exception as e:
-        return Response(f"Error: {e}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        return Response(f"Look error: {e}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
 
 
 @app.route("/flip/<player_id>/<int:row>,<int:col>")
 async def flip_endpoint(player_id: str, row: int, col: int):
-    """Încearcă să întoarcă cartea (row, col) pentru jucător."""
+    """
+    Aplica regulile de joc (1A–3B) pentru un flip.
+    """
     try:
         result = await flip(board, player_id, row, col)
         return Response(result, status=HTTPStatus.OK, mimetype="text/plain")
+    except RuntimeError as e:
+        # mesaje gen "You are in a queue..."
+        return Response(str(e), status=HTTPStatus.CONFLICT, mimetype="text/plain")
     except Exception as e:
-        return Response(f"Flip error: {e}", status=HTTPStatus.CONFLICT, mimetype="text/plain")
-    
+        return Response(f"Flip error: {e}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
 
 @app.route("/replace/<player_id>/<old_value>/<new_value>")
 async def replace_endpoint(player_id: str, old_value: str, new_value: str):
     """
-    Handles GET /replace/<player>/<from>/<to> from the web client.
-    Delegates to commands.map(), which calls BoardOps.map().
+    Inlocuieste toate cartile cu valoarea old_value cu new_value.
+    Foloseste BoardOps.replace/map.
     """
     try:
         result = await map_command(board, old_value, new_value)
@@ -53,70 +58,122 @@ async def replace_endpoint(player_id: str, old_value: str, new_value: str):
         return Response(f"Replace error: {e}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
+
 @app.route("/watch/<player_id>")
 async def watch_endpoint(player_id: str):
-    """Waits until the next board change, then returns it."""
+    """
+    Watch pentru schimbari pe board.
+    NU returneaza imediat, asteapta pana cand:
+      - se schimba starea unei carti (DOWN <-> UP, REMOVE, sau valoare schimbata)
+    Apoi intoarce look(board, player).
+    Daca nu se intampla nimic intr-un anumit timeout, intoarce tot board-ul.
+    """
     try:
-        result = await watch_command(board, player_id)
+        result = await watch(board, player_id)
         return Response(result, status=HTTPStatus.OK, mimetype="text/plain")
     except Exception as e:
         return Response(f"Watch error: {e}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
 
-# ----------------------------------------------------------
-# Restart board endpoint
-# ----------------------------------------------------------
 @app.route("/restart")
 async def restart_endpoint():
+    """
+    Reincarca fisierul de board si reseteaza toata starea dinamica:
+      - scheduler
+      - watchers
+      - locks
+      - players
+      - pending turns
+    """
     global board
     try:
+        if len(sys.argv) < 3:
+            return Response("Server was not started with a board file.",
+                            status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
         filename = sys.argv[2]
-        # clean up all old waiters/watchers
-        if board:
-            for q in getattr(board, "_waiters", {}).values():
-                while q:
-                    fut = q.popleft()
-                    if not fut.done():
-                        fut.set_result(True)
-            for fut in getattr(board, "_watchers", []):
+
+        # Trezeste watcher-ii vechi (daca exista) ca sa nu ramana await-uri blocate
+        if board is not None and hasattr(board, "_watchers") and board._watchers:
+            for fut in board._watchers:
                 if not fut.done():
                     fut.set_result(True)
-        # create new board
+            board._watchers.clear()
+
+        # Incarca un nou board din fisier
         board = Board.parse_from_file(filename)
-        print(f"Board restarted from {filename}")
+
+        # Reset complet al runtime-ului; 
+        board._scheduler = None
+        board._watchers = []     
+        board._locks = None
+        board._players = {}
+        board._pending = {}
+
         result = await look(board, "system")
         return Response(result, status=HTTPStatus.OK, mimetype="text/plain")
+
     except Exception as e:
         return Response(f"Restart error: {e}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
-    
 
 
-
-# ----------------------------------------------------------
-# Frontend static
-# ----------------------------------------------------------
 @app.route("/")
 def index():
+    """
+    Serveste UI-ul Memory Scramble: index.html din public/
+    """
     return send_from_directory(PUBLIC_DIR, "index.html")
 
 
-# ----------------------------------------------------------
-# Main entry
-# ----------------------------------------------------------
+
+@app.after_request
+def after_request(response):
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    response.headers.add(
+        "Access-Control-Allow-Headers",
+        "Content-Type,Authorization",
+    )
+    response.headers.add(
+        "Access-Control-Allow-Methods",
+        "GET,PUT,POST,DELETE,OPTIONS",
+    )
+    return response
+
+
+
 def main():
     global board
+
     if len(sys.argv) < 3:
-        raise ValueError("Usage: python src/server.py PORT FILENAME")
+        raise ValueError("Usage: python -m src.server PORT FILENAME")
 
     port = int(sys.argv[1])
     filename = sys.argv[2]
+
     board = Board.parse_from_file(filename)
 
-    print(f"Starting Memory Scramble server on port {port}...")
-    print(f"Loaded board from {filename}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    print("===============================================")
+    print("     Memory Scramble Server (Flask async)      ")
+    print("===============================================")
+    print(f"Port:        {port}")
+    print(f"Board file:  {filename}")
+    print("-----------------------------------------------")
+    print(f"  GET /look/<player_id>")
+    print(f"  GET /flip/<player_id>/<row>,<col>")
+    print(f"  GET /watch/<player_id>")
+    print(f"  GET /replace/<player_id>/<old>/<new>")
+    print(f"  GET /restart")
+    print("===============================================")
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False,
+        threaded=False,
+    )
 
 
 if __name__ == "__main__":

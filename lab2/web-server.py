@@ -10,7 +10,7 @@ import threading
 from collections import defaultdict, deque
 import posixpath
 
-
+#how many workers are optimal
 MAX_WORKERS = 10
 HOST, PORT = '0.0.0.0', 8000
 
