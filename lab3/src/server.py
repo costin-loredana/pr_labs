@@ -1,178 +1,245 @@
 import sys
 import os
-from http import HTTPStatus
-
-from flask import Flask, Response, send_from_directory
+import asyncio
+from quart import Quart, Response, jsonify
 
 from src.board import Board
-from src.commands import look, flip, map as map_command, watch
-
+from src.player import PlayerState
+from src.card import CardState
+from src.commands import look, flip, watch, map
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PUBLIC_DIR = os.path.join(ROOT_DIR, "public")
 
-app = Flask(__name__, static_folder=PUBLIC_DIR)
+app = Quart(__name__, static_folder=PUBLIC_DIR)
 
 board: Board | None = None
 
 
-@app.route("/look/<player_id>")
+
+def format_board(board: Board, view):
+    """
+    Convert board view to MIT PS4 plain-text.
+    Format:
+        RxC
+        status [value]
+        status [value]
+    """
+    lines = [f"{board._rows}x{board._cols}"]
+
+    for r in range(board._rows):
+        for c in range(board._cols):
+            token = view[r][c]
+            card = board._grid[r][c]
+
+            if token in ("down", "none"):
+                lines.append(token)
+            else:
+                # up A, my A
+                lines.append(f"{token} {card.value}")
+
+    return "\n".join(lines)
+
+
+@app.get("/look/<player_id>")
 async def look_endpoint(player_id: str):
-    """
-    Returneaza starea vizibila a tablei pentru player-ul dat.
-    NU asteapta, doar citeste.
-    """
-    try:
-        result = await look(board, player_id)
-        return Response(result, status=HTTPStatus.OK, mimetype="text/plain")
-    except Exception as e:
-        return Response(f"Look error: {e}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
-
-
-
-@app.route("/flip/<player_id>/<int:row>,<int:col>")
-async def flip_endpoint(player_id: str, row: int, col: int):
-    """
-    Aplica regulile de joc (1A–3B) pentru un flip.
-    """
-    try:
-        result = await flip(board, player_id, row, col)
-        return Response(result, status=HTTPStatus.OK, mimetype="text/plain")
-    except RuntimeError as e:
-        # mesaje gen "You are in a queue..."
-        return Response(str(e), status=HTTPStatus.CONFLICT, mimetype="text/plain")
-    except Exception as e:
-        return Response(f"Flip error: {e}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
-
-
-@app.route("/replace/<player_id>/<old_value>/<new_value>")
-async def replace_endpoint(player_id: str, old_value: str, new_value: str):
-    """
-    Inlocuieste toate cartile cu valoarea old_value cu new_value.
-    Foloseste BoardOps.replace/map.
-    """
-    try:
-        result = await map_command(board, old_value, new_value)
-        return Response(result, status=HTTPStatus.OK, mimetype="text/plain")
-    except Exception as e:
-        return Response(f"Replace error: {e}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
-
-
-
-@app.route("/watch/<player_id>")
-async def watch_endpoint(player_id: str):
-    """
-    Watch pentru schimbari pe board.
-    NU returneaza imediat, asteapta pana cand:
-      - se schimba starea unei carti (DOWN <-> UP, REMOVE, sau valoare schimbata)
-    Apoi intoarce look(board, player).
-    Daca nu se intampla nimic intr-un anumit timeout, intoarce tot board-ul.
-    """
-    try:
-        result = await watch(board, player_id)
-        return Response(result, status=HTTPStatus.OK, mimetype="text/plain")
-    except Exception as e:
-        return Response(f"Watch error: {e}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
-
-
-
-@app.route("/restart")
-async def restart_endpoint():
-    """
-    Reincarca fisierul de board si reseteaza toata starea dinamica:
-      - scheduler
-      - watchers
-      - locks
-      - players
-      - pending turns
-    """
     global board
+
     try:
-        if len(sys.argv) < 3:
-            return Response("Server was not started with a board file.",
-                            status=HTTPStatus.INTERNAL_SERVER_ERROR)
-
-        filename = sys.argv[2]
-
-        # Trezeste watcher-ii vechi (daca exista) ca sa nu ramana await-uri blocate
-        if board is not None and hasattr(board, "_watchers") and board._watchers:
-            for fut in board._watchers:
-                if not fut.done():
-                    fut.set_result(True)
-            board._watchers.clear()
-
-        # Incarca un nou board din fisier
-        board = Board.parse_from_file(filename)
-
-        # Reset complet al runtime-ului; 
-        board._scheduler = None
-        board._watchers = []     
-        board._locks = None
-        board._players = {}
-        board._pending = {}
-
-        result = await look(board, "system")
-        return Response(result, status=HTTPStatus.OK, mimetype="text/plain")
+        board._players.setdefault(player_id, PlayerState())
+        view = await look(board, player_id)
+        txt = format_board(board, view)
+        return Response(txt, content_type="text/plain")
 
     except Exception as e:
-        return Response(f"Restart error: {e}", status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        print("LOOK ERROR:", e)
+        return Response(f"Look error: {e}", status=500)
+
+
+@app.get("/watch/<player_id>")
+async def watch_endpoint(player_id: str):
+    global board
+
+    try:
+        board._players.setdefault(player_id, PlayerState())
+
+        try:
+            view = await asyncio.wait_for(watch(board, player_id), timeout=30.0)
+            txt = format_board(board, view)
+            return Response(txt, content_type="text/plain")
+        except asyncio.TimeoutError:
+            print(f"[WATCH] Timeout for player {player_id}, returning current state")
+            view = await look(board, player_id)
+            txt = format_board(board, view)
+            return Response(txt, content_type="text/plain")
+
+    except Exception as e:
+        print("WATCH ERROR:", e)
+        try:
+            view = await look(board, player_id)
+            txt = format_board(board, view)
+            return Response(txt, content_type="text/plain")
+        except Exception as inner_e:
+            print("WATCH FALLBACK ERROR:", inner_e)
+            return Response("Watch error", status=500)
+
+
+@app.get("/flip/<player_id>/<int:row>,<int:col>")
+async def flip_endpoint(player_id: str, row: int, col: int):
+    global board
+
+    try:
+        board._players.setdefault(player_id, PlayerState())
+        result = await flip(board, player_id, row, col)
+
+        if result == "fail":
+            return Response("flip failed", status=409)
+
+        view = await look(board, player_id)
+        txt = format_board(board, view)
+        return Response(txt, content_type="text/plain")
+
+    except Exception as e:
+        print("FLIP ERROR:", e)
+        return Response(f"Flip error: {e}", status=500)
 
 
 
-@app.route("/")
-def index():
-    """
-    Serveste UI-ul Memory Scramble: index.html din public/
-    """
-    return send_from_directory(PUBLIC_DIR, "index.html")
+@app.get("/map/<player_id>/<operation>")
+async def map_endpoint(player_id: str, operation: str):
+    global board
+
+    try:
+        board._players.setdefault(player_id, PlayerState())
+
+        if operation == "upper":
+            async def f(x): return x.upper()
+
+        elif operation == "lower":
+            async def f(x): return x.lower()
+
+        elif operation == "reverse":
+            async def f(x): return x[::-1]
+
+        else:
+            return Response(f"Unknown map op '{operation}'", status=400)
+
+        txt = await map(board, player_id, f)
+        return Response(txt, content_type="text/plain")
+
+    except Exception as e:
+        print("MAP ERROR:", e)
+        return Response(f"Map error: {e}", status=500)
+
+
+@app.get("/replace/<player_id>/<old>/<new>")
+async def replace_endpoint(player_id: str, old: str, new: str):
+    global board
+
+    try:
+        board._players.setdefault(player_id, PlayerState())
+
+        count = 0
+        for r, c, card in board.iter_positions():
+            if card.state != CardState.REMOVED and card.value == old:
+                board.set_card_value(r, c, new)
+                count += 1
+
+        view = await look(board, player_id)
+        txt = format_board(board, view)
+
+        print(f"[DEBUG] REPLACE {old} → {new}: {count} cards changed")
+        return Response(txt, content_type="text/plain")
+
+    except Exception as e:
+        print("REPLACE ERROR:", e)
+        return Response(f"Replace error: {e}", status=500)
+
+
+@app.get("/restart")
+async def restart_endpoint():
+    global board
+
+    try:
+        if board is None or not hasattr(board, "_filename"):
+            return Response("Cannot restart - no board file", status=400)
+
+        print("[RESTART] Resetting board...")
+
+        filename = board._filename
+
+        new_board = await Board.parseFromFile(filename)
+        new_board._filename = filename
+
+        new_board._change_count = 1
+
+        board = new_board
+
+        print("[RESTART] Board successfully reset.")
+        return Response("Game restarted", status=200)
+
+    except Exception as e:
+        print("RESTART ERROR:", e)
+        return Response(f"Restart error: {e}", status=500)
 
 
 
-@app.after_request
-def after_request(response):
-    response.headers.add("Access-Control-Allow-Origin", "*")
-    response.headers.add(
-        "Access-Control-Allow-Headers",
-        "Content-Type,Authorization",
-    )
-    response.headers.add(
-        "Access-Control-Allow-Methods",
-        "GET,PUT,POST,DELETE,OPTIONS",
-    )
-    return response
+@app.get("/debug")
+async def debug_board():
+    global board
+
+    if board is None:
+        return jsonify({"error": "Board not loaded"})
+
+    return jsonify({
+        "rows": board._rows,
+        "cols": board._cols,
+        "players": list(board._players.keys()),
+        "grid": [
+            [
+                {
+                    "pos": (r, c),
+                    "value": board._grid[r][c].value,
+                    "state": board._grid[r][c].state.value,
+                    "controller": board._grid[r][c].controller,
+                }
+                for c in range(board._cols)
+            ]
+            for r in range(board._rows)
+        ],
+        "change_count": board._change_count
+    })
+
+
+
+@app.get("/")
+async def index():
+    return await app.send_static_file("index.html")
+
+
+async def startup(filename: str):
+    global board
+    board = await Board.parseFromFile(filename)
+    board._filename = filename
+    print(f"Loaded board: {board._rows}x{board._cols}")
+    print(f"Watch support: ENABLED")
 
 
 
 def main():
-    global board
-
     if len(sys.argv) < 3:
-        raise ValueError("Usage: python -m src.server PORT FILENAME")
+        print("Usage: python -m src.server PORT BOARD_FILE")
+        sys.exit(1)
 
     port = int(sys.argv[1])
     filename = sys.argv[2]
 
-    board = Board.parse_from_file(filename)
-
-    print("===============================================")
-    print("     Memory Scramble Server (Flask async)      ")
-    print("===============================================")
-    print(f"Port:        {port}")
-    print(f"Board file:  {filename}")
-    print("-----------------------------------------------")
-    print(f"  GET /look/<player_id>")
-    print(f"  GET /flip/<player_id>/<row>,<col>")
-    print(f"  GET /watch/<player_id>")
-    print(f"  GET /replace/<player_id>/<old>/<new>")
-    print(f"  GET /restart")
-    print("===============================================")
+    asyncio.run(startup(filename))
 
     app.run(
         host="0.0.0.0",
         port=port,
-        debug=False,
-        use_reloader=False,
-        threaded=False,
+        debug=False
     )
 
 

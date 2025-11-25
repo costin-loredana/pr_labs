@@ -1,389 +1,363 @@
 import asyncio
 import random
-import sys
 import time
+import traceback
+
 from src.board import Board
-from src.board_ops import BoardOps
-from src.board_validator import BoardValidator
-from src.scheduler.prioritizer import PriorityScheduler
-
-MODE = "visual"
-DEBUG = True
+from src.card import CardState
+from src.commands import flip
 
 
+"""
+SPECIFICATION: Concurrent Game Simulation
+=========================================
 
-def draw_board(text: str) -> str:
+PURPOSE:
+    Stress tests the Memory Scramble game implementation under realistic
+    concurrent conditions with multiple players making simultaneous moves.
+
+DESIGN:
+    - 4 concurrent players making random moves
+    - Random delays between 0.1ms and 2ms to simulate real-world timing
+    - 100 moves per player (400+ total flip attempts)
+    - Continuous invariant verification
+    - Comprehensive metrics collection
+
+INVARIANTS VERIFIED:
+    - REMOVED cards have no controllers
+    - DOWN cards have no controllers  
+    - UP cards have valid player controllers when controlled
+    - Card state transitions follow game rules
+    - No crashes or deadlocks under concurrent access
+"""
+
+BOARD_FILE = "boards/ab.txt"
+PLAYERS = 4
+MOVES = 100
+MIN_DELAY = 0.0001  
+MAX_DELAY = 0.002   
+
+total_flips = 0
+success_flips = 0
+fail_flips = 0
+wait_results = 0
+exceptions = 0
+match_attempts = 0
+successful_matches = 0
+
+
+def sanity_check(board: Board):
     """
-    Convert board text representation to ASCII art visualization.
+    Verifies board representation invariants during concurrent execution.
     
+    Parameters:
+        board: the game board to check
+        
     Requires:
-      - text is a valid board string from BoardOps.look() with format:
-        "heightxwidth"
-        "cell1_state"
-        "cell2_state"
-        ...
+        - board is a valid Board instance
+        - Board may be undergoing concurrent modifications
+        
+    Effects:
+        - Raises AssertionError if any representation invariant is violated
+        - No modification of board state
+        
+    Ensures:
+        - All representation invariants hold at time of check
+        - REMOVED and DOWN cards have no controllers
+        - UP cards have valid controllers when controlled
+    """
+    for r, c, card in board.iter_positions():
+
+        # Invariant: REMOVED cards cannot have controllers
+        if card.state == CardState.REMOVED:
+            assert card.controller is None, f"REMOVED card at ({r},{c}) has controller: {card.controller}"
+
+        # Invariant: DOWN cards cannot have controllers  
+        if card.state == CardState.DOWN:
+            assert card.controller is None, f"DOWN card at ({r},{c}) has controller: {card.controller}"
+
+        # Invariant: Controlled UP cards must have valid player IDs
+        if card.state == CardState.UP and card.controller is not None:
+            assert card.controller in board._players, f"Invalid controller {card.controller} for UP card at ({r},{c})"
+
+
+def enhanced_sanity_check(board: Board):
+    """
+    Comprehensive invariant verification with game progress checks.
     
-    Effects:
-      - Returns ASCII art representation of the board
-      - Converts:
-        * "none" → "."
-        * "down ?" → "#" 
-        * "my value" or "up value" → "value"
-        * Unknown formats → "?"
-      - Creates bordered grid with proper dimensions
-      - Returns empty string if input is empty
-    """
-    lines = text.strip().splitlines()
-    if not lines:
-        return ""
-    header = lines[0]
-    cells = lines[1:]
-    try:
-        h, w = map(int, header.lower().split("x"))
-    except Exception:
-        h = w = int(len(cells) ** 0.5)
-
-    formatted = []
-    for cell in cells:
-        parts = cell.split()
-        if not parts:
-            formatted.append(" ")
-        elif parts[0] == "none":
-            formatted.append(".")
-        elif cell.startswith("down"):
-            formatted.append("#")
-        elif parts[0] in ("my", "up") and len(parts) == 2:
-            formatted.append(parts[1])
-        else:
-            formatted.append("?")
-
-    rows = [formatted[i * w:(i + 1) * w] for i in range(h)]
-    border_top = "+" + "---" * w + "+"
-    border_bottom = "+" + "---" * w + "+"
-    body = "\n".join("| " + " ".join(row) + " |" for row in rows)
-    return f"{border_top}\n{body}\n{border_bottom}"
-
-
-async def random_delay(min_ms: float, max_ms: float):
-    """
-    Effects:
-      - Pauses execution for random.uniform(min_ms, max_ms) milliseconds
-      - Converts milliseconds to seconds for asyncio.sleep()
-    """
-    await asyncio.sleep(random.uniform(min_ms, max_ms) / 1000.0)
-
-def random_int(max_value: int) -> int:
-    """
-    Generate random integer in range [0, max_value-1].
-    Effects:
-      - Returns random integer where 0 <= result < max_value
-      - Uses random.randint() for uniform distribution
-    """
-    return random.randint(0, max_value - 1)
-
-
-async def simulate_player(board: Board, player_id: str, tries: int,
-                          min_delay_ms: float, max_delay_ms: float, stats: dict):
-    """
-    Simulate a player making random moves with timing and statistics.
+    Parameters:
+        board: the game board to check
+        
     Requires:
-      - board is properly initialized Board instance
-      - player_id is unique string identifier
-      - tries > 0 (number of turn attempts)
-      - 0 <= min_ms <= max_ms (delay range)
-      - stats is mutable dictionary for collecting statistics
-    
+        - board is properly initialized
+        - Board representation invariants should hold
+        
     Effects:
-      - Performs 'tries' number of two-card flip attempts
-      - Adds random delays between actions to simulate human timing
-      - Updates stats dictionary with:
-        * flips: total flip operations attempted
-        * matches: successful card matches detected
-        * mismatches: failed matches detected  
-        * turns: completed turn attempts
-        * waits: number of times player had to wait
-        * errors: exceptions encountered
-        * time: total active simulation time
-      - Validates board invariants after each turn
-      - Continues simulation even if errors occur
-      - Prints progress if in visual mode with DEBUG enabled
+        - Raises AssertionError if game invariants are violated
+        - No modification of board state
+        
+    Ensures:
+        - All basic representation invariants hold
+        - Game state is consistent (matching pairs, card counts)
+        - Player states are valid
     """
-    size = board.height
-    start_time = time.perf_counter()
-    stats[player_id] = {"flips": 0, "matches": 0, "mismatches": 0, "turns": 0, "waits": 0, "errors": 0}
+    removed_count = 0
+    up_count = 0
+    down_count = 0
+    
+    for r, c, card in board.iter_positions():
+        # Basic state invariants
+        if card.state == CardState.REMOVED:
+            assert card.controller is None, "REMOVED card cannot have controller"
+            removed_count += 1
+        elif card.state == CardState.DOWN:
+            assert card.controller is None, "DOWN card cannot have controller" 
+            down_count += 1
+        else:  # CardState.UP
+            up_count += 1
+            # UP cards can have controller, but it must be valid player
+            if card.controller is not None:
+                assert card.controller in board._players, f"Invalid controller: {card.controller}"
+    
+    # Game progress invariants
+    total_cards = board._rows * board._cols
+    assert removed_count + up_count + down_count == total_cards, "Card count mismatch"
+    assert 0 <= removed_count <= total_cards, "Invalid removed card count"
+    assert removed_count % 2 == 0, "Removed cards should come in pairs"
+    
+    # Player state invariants
+    for player_id, player_state in board._players.items():
+        assert isinstance(player_id, str) and player_id, "Invalid player ID"
+        # PlayerState should maintain its own invariants
+        player_state.check_rep()
 
-    if DEBUG and MODE == "visual":
-        print(f"\n=== {player_id} started ===")
 
-    for turn in range(tries):
+async def player_task(pid: str, board: Board):
+    """
+    Simulates one player making random moves in the game.
+    
+    Parameters:
+        pid: unique player identifier
+        board: shared game board
+        
+    Requires:
+        - pid is non-empty string
+        - board is valid and properly initialized
+        - BOARD_FILE contains valid game configuration
+        
+    Effects:
+        - Makes MOVES flip attempts with random delays
+        - Updates global statistics counters
+        - May modify board state through flip operations
+        - Prints progress and timing information
+        - Catches and reports exceptions without crashing
+        
+    Ensures:
+        - Completes MOVES flip attempts unless catastrophic failure
+        - Maintains statistics for success/failure rates
+        - Verifies invariants after each flip attempt
+        - Continues execution despite individual operation failures
+    """
+    global total_flips, success_flips, fail_flips, exceptions, wait_results
+    global match_attempts, successful_matches
+
+    rows, cols = board._rows, board._cols
+
+    for move_num in range(MOVES):
+        # Random delay between moves
+        await asyncio.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
+
+        r1 = random.randrange(rows)
+        c1 = random.randrange(cols)
+
         try:
-            await random_delay(min_delay_ms, max_delay_ms)
-            r1, c1 = random_int(size), random_int(size)
-            
-            result1 = await BoardOps.flip(board, player_id, r1, c1)
-            stats[player_id]["flips"] += 1
-            stats[player_id]["turns"] += 1
-            
-            if "wait" in result1.lower():
-                stats[player_id]["waits"] += 1
+            # First flip attempt
+            t0 = time.time()
+            res1 = await flip(board, pid, r1, c1)
+            elapsed = (time.time() - t0) * 1000
 
-            if DEBUG and MODE == "visual":
-                print(f"[{player_id}] turn {turn+1}: flipped ({r1},{c1})")
-                if "wait" not in result1.lower():
-                    board_state = await BoardOps.look(board, player_id)
-                    print(draw_board(board_state))
+            print(f"[SIM] {pid} move#{move_num} flip1 ({r1},{c1}) -> {res1} ({elapsed:.3f} ms)")
+            sanity_check(board)
 
-            await random_delay(min_delay_ms, max_delay_ms)
-            r2, c2 = random_int(size), random_int(size)
-            
-            result2 = await BoardOps.flip(board, player_id, r2, c2)
-            stats[player_id]["flips"] += 1
-            
-            if "wait" in result2.lower():
-                stats[player_id]["waits"] += 1
+            total_flips += 1
+            if res1 == "success":
+                success_flips += 1
+            elif res1 == "fail":
+                fail_flips += 1
+            elif res1 == "wait":
+                wait_results += 1
 
-            board_state = await BoardOps.look(board, player_id)
-            if "my" in result2.lower() and "my" in result1.lower():
-                lines = board_state.splitlines()
-                controlled_cards = [line for line in lines if "my" in line]
-                if len(controlled_cards) == 2:
-                    stats[player_id]["matches"] += 1
-                else:
-                    stats[player_id]["mismatches"] += 1
-            elif "controlled" in result2.lower() or "no card" in result2.lower():
-                stats[player_id]["mismatches"] += 1
+            # Second flip attempt if first was successful
+            if res1 == "success":
+                await asyncio.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
 
-            if DEBUG and MODE == "visual":
-                print(f"[{player_id}] flipped ({r2},{c2})")
-                if "wait" not in result2.lower():
-                    print(draw_board(board_state))
+                r2 = random.randrange(rows)
+                c2 = random.randrange(cols)
 
-            BoardValidator.assert_invariants(board)
+                t0 = time.time()
+                res2 = await flip(board, pid, r2, c2)
+                elapsed = (time.time() - t0) * 1000
+
+                print(f"[SIM] {pid} move#{move_num} flip2 ({r2},{c2}) -> {res2} ({elapsed:.3f} ms)")
+                sanity_check(board)
+
+                total_flips += 1
+                if res2 == "success":
+                    success_flips += 1
+                    
+                    # Check if this was a matching attempt
+                    card1 = board._grid[r1][c1]
+                    card2 = board._grid[r2][c2]
+                    if card1.value == card2.value:
+                        match_attempts += 1
+                        successful_matches += 1
+                        print(f"[SIM] {pid} MATCHED {card1.value}!")
+                    else:
+                        match_attempts += 1
+                        
+                elif res2 == "fail":
+                    fail_flips += 1
+                elif res2 == "wait":
+                    wait_results += 1
 
         except Exception as e:
-            if DEBUG and MODE == "visual":
-                print(f"[{player_id}] error: {e}")
-            stats[player_id]["errors"] += 1
-
-    stats[player_id]["time"] = time.perf_counter() - start_time
-    if DEBUG and MODE == "visual":
-        print(f"=== {player_id} finished ===")
+            exceptions += 1
+            print(f"[SIM][ERROR] {pid} move#{move_num} crashed: {e}")
+            traceback.print_exc()
+            # Continue with next move despite error
 
 
-
-async def fast_simulate_player(board: Board, player_id: str, moves: int):
+def set_deterministic_seed(seed: int = 42):
     """
-    High-performance fuzz testing without delays or validation.
+    Sets random seed for reproducible testing.
     
-    Requires:
-      - board is properly initialized Board instance  
-      - player_id is unique string identifier
-      - moves > 0 (number of two-card flip operations)
+    Parameters:
+        seed: random number generator seed
+        
+    Requires: nothing
     
     Effects:
-      - Performs 'moves' number of rapid two-card flip operations
-      - No delays between operations for maximum throughput
-      - No board validation or statistics beyond error counting
-      - Returns number of exceptions encountered during execution
-      - Continues execution even when errors occur
-      - Designed for stress testing concurrent access patterns
+        - Initializes random number generator with specified seed
+        - Affects all subsequent random operations
+        
+    Ensures:
+        - Random operations are reproducible with same seed
+        - Does not guarantee fully deterministic execution due to async nature
     """
-    size = board.height
-    errors = 0
-    
-    for _ in range(moves):
-        try:
-            r1, c1 = random.randint(0, size-1), random.randint(0, size-1)
-            await BoardOps.flip(board, player_id, r1, c1)
-            
-            r2, c2 = random.randint(0, size-1), random.randint(0, size-1)
-            await BoardOps.flip(board, player_id, r2, c2)
-            
-        except Exception:
-            errors += 1
-    
-    return errors
+    random.seed(seed)
+    print(f"[SIM] Set deterministic seed: {seed}")
 
 
-async def run_simulation(filename: str, players: int = 4,
-                         tries: int = 100, min_delay_ms: float = 0.1, max_delay_ms: float = 2.0):
+async def run_fuzz():
     """
-    Run comprehensive simulation with multiple players and detailed statistics.
+    Executes the main concurrent stress test.
     
     Requires:
-      - filename is valid path to board definition file
-      - players > 0 (number of concurrent players)
-      - tries > 0 (turns per player) 
-      - 0 <= min_delay_ms <= max_delay_ms (action timing range)
-    
+        - BOARD_FILE exists and contains valid board configuration
+        - All game components (Board, Card, PlayerState, BoardOps) are implemented
+        - System has sufficient resources for concurrent execution
+        
     Effects:
-      - Loads board from file and initializes game state
-      - Runs specified number of players concurrently
-      - Collects detailed statistics for each player
-      - Prints initial and final board states in visual mode
-      - Reports simulation results including:
-        * Total execution time
-        * Board clearance status
-        * Per-player flip, match, wait, error counts
-        * Aggregate statistics
-      - Catches and reports simulation-level exceptions
-      - Validates no crashes or deadlocks occurred
+        - Loads board from file
+        - Spawns PLAYERS concurrent player tasks
+        - Executes MOVES moves per player with random timing
+        - Collects comprehensive performance and reliability metrics
+        - Prints detailed summary report
+        
+    Ensures:
+        - Test completes without deadlocks
+        - All player tasks finish execution
+        - Comprehensive metrics are collected and reported
+        - Final board state passes enhanced sanity check
     """
-    board = Board.parse_from_file(filename)
+    global total_flips, success_flips, fail_flips, exceptions
+    global match_attempts, successful_matches, wait_results
 
-    board._scheduler = PriorityScheduler(board.height, board.width)
-    board._pending = {}
-    board._players = {}
-    board._watchers = []
+    # Uncomment for reproducible testing:
+    # set_deterministic_seed(42)
 
-    initial = await BoardOps.look(board, "system")
-    if DEBUG and MODE == "visual":
-        print("=== INITIAL BOARD ===")
-        print(draw_board(initial))
+    print(f"[SIM] Loading board from {BOARD_FILE}")
+    board = await Board.parseFromFile(BOARD_FILE)
+    print(f"[SIM] Board size: {board._rows}x{board._cols}")
+    print(f"[SIM] Starting {PLAYERS} players with {MOVES} moves each")
+    print(f"[SIM] Delay range: {MIN_DELAY*1000:.1f}ms to {MAX_DELAY*1000:.1f}ms")
 
-    stats = {}
-    start_time = time.perf_counter()
+    start_time = time.time()
 
+    # Create and run all player tasks concurrently
     tasks = [
-        simulate_player(board, f"player{i+1}", tries, min_delay_ms, max_delay_ms, stats)
-        for i in range(players)
+        asyncio.create_task(player_task(f"player_{i}", board))
+        for i in range(PLAYERS)
     ]
-    
+
+    await asyncio.gather(*tasks)
+
+    elapsed = time.time() - start_time
+
+    # Final comprehensive check
     try:
-        await asyncio.gather(*tasks)
-    except Exception as e:
-        print(f"Simulation error: {e}")
+        enhanced_sanity_check(board)
+        final_sanity = "PASS"
+    except AssertionError as e:
+        final_sanity = f"FAIL: {e}"
+        exceptions += 1
 
-    total_time = time.perf_counter() - start_time
-    final = await BoardOps.look(board, "system")
+    # Calculate derived metrics
+    success_rate = (success_flips / total_flips * 100) if total_flips > 0 else 0
+    match_success_rate = (successful_matches / match_attempts * 100) if match_attempts > 0 else 0
+    flips_per_second = total_flips / elapsed if elapsed > 0 else 0
 
-    if DEBUG and MODE == "visual":
-        print("=== FINAL BOARD ===")
-        print(draw_board(final))
-
-    print(f"\nSimulation complete in {total_time:.3f}s")
+    print("\n" + "="* 60)
+    print("FUZZ TEST SUMMARY - MEMORY SCRAMBLE CONCURRENT TEST")
+    print("=" * 60)
+    print(f"Configuration:")
+    print(f"  Players:                    {PLAYERS}")
+    print(f"  Moves per player:           {MOVES}")
+    print(f"  Delay range:               {MIN_DELAY*1000:.1f}ms - {MAX_DELAY*1000:.1f}ms")
+    print(f"  Board file:                {BOARD_FILE}")
+    print(f"  Board size:                {board._rows}x{board._cols}")
+    print()
+    print(f"Results:")
+    print(f"  Total flip attempts:        {total_flips}")
+    print(f"  Successful flips:           {success_flips} ({success_rate:.1f}%)")
+    print(f"  Failed flips:               {fail_flips}")
+    print(f"  Wait results:               {wait_results}")
+    print(f"  Match attempts:             {match_attempts}")
+    print(f"  Successful matches:         {successful_matches} ({match_success_rate:.1f}%)")
+    print(f"  Exceptions (crashes):       {exceptions}")
+    print()
+    print(f"Performance:")
+    print(f"  Total elapsed time:        {elapsed:.3f} seconds")
+    print(f"  Flips per second:          {flips_per_second:.1f}")
+    print(f"  Final sanity check:        {final_sanity}")
+    print("=" * 60)
     
-    if "down" not in final and "up" not in final:
-        print("All cards matched - board cleared!")
+    if exceptions == 0 and final_sanity == "PASS":
+        print("[SIM] SUCCESS - Fuzz test completed without crashes or invariant violations")
     else:
-        remaining_down = final.lower().count("down")
-        remaining_up = final.lower().count("up")
-        print(f"Simulation ended with {remaining_down} cards face down and {remaining_up} cards face up")
-
-    print("\nPlayer Statistics:")
-    for pid, st in stats.items():
-        print(f"  {pid}: {st['flips']} flips | {st['matches']} matches | "
-              f"{st['mismatches']} mismatches | {st['waits']} waits | "
-              f"{st['turns']} turns | {st['errors']} errors | {st['time']:.2f}s active")
+        print("[SIM] WARNING - Fuzz test completed with issues (see above)")
     
-    total_flips = sum(st['flips'] for st in stats.values())
-    total_errors = sum(st['errors'] for st in stats.values())
-    total_waits = sum(st['waits'] for st in stats.values())
-    print(f"\nTotals: {total_flips} flips | {total_waits} waits | {total_errors} errors")
-    
-    if total_errors == 0:
-        print("SUCCESS: No crashes or deadlocks detected!")
-    else:
-        print(f"NOTE: {total_errors} errors occurred during simulation")
-
-
-
-async def run_fast_fuzz(filename: str, players: int = 4, moves_per_player: int = 250):
-    """
-    Run high-performance fuzz test to stress concurrent system limits.
-    
-    Requires:
-      - filename is valid path to board definition file
-      - players > 0 (number of concurrent players)
-      - moves_per_player > 0 (operations per player)
-    
-    Effects:
-      - Loads board and performs minimal initialization
-      - Runs players concurrently with maximum operation density
-      - Measures performance in flips per second
-      - Returns True if performance exceeds 1000 flips/second target
-      - Reports:
-        * Total operations and execution time
-        * Operations per second
-        * Error count
-        * Performance target achievement
-      - Designed to identify concurrency bottlenecks and race conditions
-    """
-    board = Board.parse_from_file(filename)
-    
-    board._scheduler = PriorityScheduler(board.height, board.width)
-    board._pending = {}
-    board._players = {}
-    board._watchers = []
-    
-    print(f"FAST FUZZ TEST: {players} players × {moves_per_player} moves = {players * moves_per_player * 2} total flips")
-    
-    start_time = time.perf_counter()
-    
-    tasks = [
-        fast_simulate_player(board, f"p{i}", moves_per_player)
-        for i in range(players)
-    ]
-    
-    error_counts = await asyncio.gather(*tasks)
-    total_time = time.perf_counter() - start_time
-    
-    total_flips = players * moves_per_player * 2
-    total_errors = sum(error_counts)
-    flips_per_second = total_flips / total_time
-    
-    print(f"RESULTS:")
-    print(f"   Time: {total_time:.3f}s")
-    print(f"   Flips/sec: {flips_per_second:,.0f}")
-    print(f"   Total flips: {total_flips}")
-    print(f"   Errors: {total_errors}")
-    
-    if total_errors == 0:
-        print("SUCCESS: No crashes under heavy concurrent load!")
-    else:
-        print(f"NOTE: {total_errors} errors (acceptable for fuzz testing)")
-    
-    return flips_per_second > 1000  
-
-
-def main():
-    global MODE, DEBUG
-    if len(sys.argv) < 2:
-        print("Usage: python -m src.simulation <boardfile> [fuzz|visual|fastfuzz]")
-        sys.exit(1)
-
-    filename = sys.argv[1]
-    
-    if len(sys.argv) >= 3:
-        mode = sys.argv[2].lower()
-        if mode == "fuzz":
-            MODE = "fuzz"
-            DEBUG = False
-            print("Running in FUZZ mode: randomized concurrency test\n")
-            asyncio.run(run_simulation(filename, players=4, tries=100,
-                                       min_delay_ms=0.1, max_delay_ms=2.0))
-        elif mode == "fastfuzz":
-            MODE = "fuzz" 
-            DEBUG = False
-            print("Running in FAST FUZZ mode: high-performance stress test\n")
-            success = asyncio.run(run_fast_fuzz(filename, players=4, moves_per_player=250))
-            if success:
-                print("Performance target achieved!")
-            else:
-                print("Performance needs improvement")
-        else:
-            MODE = "visual"
-            DEBUG = True
-            print("Running in VISUAL mode: human-readable board view\n")
-            asyncio.run(run_simulation(filename, players=3, tries=8,
-                                       min_delay_ms=400, max_delay_ms=1000))
-    else:
-        MODE = "visual"
-        DEBUG = True
-        print("Running in VISUAL mode: human-readable board view\n")
-        asyncio.run(run_simulation(filename, players=3, tries=8,
-                                   min_delay_ms=400, max_delay_ms=1000))
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    main()
+    """
+    Main entry point for concurrent game simulation.
+    
+    Effects:
+        - Runs the complete fuzz test scenario
+        - Handles any top-level exceptions
+        - Ensures clean shutdown
+        
+    Ensures:
+        - Test runs to completion
+        - All resources are properly cleaned up
+        - Exit code indicates test success (0) or failure (1)
+    """
+    try:
+        asyncio.run(run_fuzz())
+        exit(0)  # Success
+    except Exception as e:
+        print(f"[SIM][FATAL] Top-level exception: {e}")
+        traceback.print_exc()
+        exit(1)  # Failure

@@ -1,224 +1,566 @@
-from __future__ import annotations
 import asyncio
+from typing import Dict, Tuple, Optional, List
 from pathlib import Path
-from dataclasses import dataclass
-from typing import Optional, List, Dict, Tuple
-from src.game_states import CardState
+
+from src.card import Card, CardState
+from src.player import PlayerState
 
 
-
-@dataclass
-class _Card:
-    """
-    Internal representation of a single card in the memory game.
-    
-    Representation Invariant:
-      - value is non-empty string
-      - state is a valid CardState enum value
-      - If state == CardState.NONE then controller == None
-      - If matched == True, typically indicates card was part of a successful pair
-    
-    Note: This is an internal data class not intended for direct external use.
-    Clients should interact with cards through Board and BoardOps interfaces.
-    """
-    value: str
-    state: CardState
-    controller: Optional[str] = None
-    last_controller: Optional[str] = None
-    matched: bool = False  
-
+def dbg_board(*msg):
+    print("[DEBUG][BOARD]", *msg, flush=True)
 
 
 class Board:
     """
-    Abstraction function:
-        Represents a 2D grid of cards where each cell has a visible state and controller.
-
-    Representation invariant:
-        - width, height > 0
-        - each row has exactly `width` cards
-        - if state == "none" then controller == None
-        - _grid, _players are private
+    A Board represents the game state for a memory matching game.
+    
+    ABSTRACTION FUNCTION (AF):
+        AF(self) = a game board with:
+        - dimensions: rows × columns  
+        - card matrix M where M[r][c] has value and visibility state
+        - player registry mapping player_id → PlayerState
+        - synchronization state for card access and change notifications
+    
+    REPRESENTATION INVARIANTS (RI):
+        - _rows > 0 and _cols > 0
+        - _grid is _rows × _cols matrix of Card objects
+        - All Card objects have valid CardState values
+        - If card.state == REMOVED, then card.controller == None
+        - _change_count ≥ 0
+        - _players keys are non-empty strings
+    
+    SAFETY FROM REP EXPOSURE:
+        - No direct access to _grid, _players, or _waiters
+        - All returned data is either immutable or fresh copies
+        - Card objects are not exposed directly to clients
     """
 
-    def __init__(self, width: int, height: int, grid: List[List[_Card]], players: Dict[str, List[Tuple[int, int]]]):
+    def __init__(self, rows: int, cols: int, values: List[str]):
         """
-        Initialize a new game board with specified dimensions and cards.
+        Creates a new Board with specified dimensions and card values.
+        
+        Parameters:
+            rows: number of rows (must be > 0)
+            cols: number of columns (must be > 0) 
+            values: card values in row-major order (length must equal rows*cols)
+            
+        Throws:
+            ValueError: if rows ≤ 0 or cols ≤ 0 or length mismatch
+        
         Requires:
-          - width > 0 and height > 0
-          - grid is a height × width matrix of _Card objects
-          - players is a dictionary mapping player IDs to their controlled positions
-          - All cards in grid have valid states and values
+            - rows > 0 and cols > 0
+            - len(values) == rows * cols
+            - All values are non-empty strings
+            
         Effects:
-          - Creates a new board with the specified cards and player states
-          - Initializes per-position locks for concurrent access
-          - Initializes empty watchers list and pending actions dictionary
-          - Sets scheduler to None (to be initialized by BoardOps)
-          - Verifies representation invariant via check_rep()
+            - Initializes _grid as rows×cols matrix of Cards with given values
+            - All cards start in CardState.DOWN
+            - _players = empty dictionary
+            - _waiters = empty dictionary  
+            - _change_count = 0
+            - _change_waiters = empty list
+            
+        Ensures:
+            - Representation invariants hold
+            - Board is ready for game operations
         """
-        self.width = width
-        self.height = height
-        self._grid = grid                        # 2D list of Card objects
-        self._players = players                  
-        self._pending: Dict[str, Tuple[List[Tuple[int, int]], bool]] = {}  
-        self._scheduler = None
-        self._locks: Dict[Tuple[int, int], asyncio.Lock] = {
-            (r, c): asyncio.Lock()
-            for r in range(height)
-            for c in range(width)
-        }
-        self._watchers: List[asyncio.Future] = []
-        self.check_rep()
+        if rows <= 0 or cols <= 0:
+            raise ValueError("rows and cols must be positive")
+        if rows * cols != len(values):
+            raise ValueError("board size mismatch")
 
-    def check_rep(self):
-        """
-        Verify that the representation invariant holds.
-        Effects:
-          - Asserts that board dimensions are positive
-          - Asserts that _grid has correct height and each row has correct width
-          - Raises AssertionError if any invariant is violated
-        """
-        assert self.width > 0 and self.height > 0, "Board must have positive dimensions"
-        assert len(self._grid) == self.height, f"expected {self.height} rows, got {len(self._grid)}"
-        for i, row in enumerate(self._grid):
-            assert len(row) == self.width, f"expected {self.width} columns in row {i}, got {len(row)}"
+        self._rows = rows
+        self._cols = cols
 
+        # Build 2D grid of Cards
+        self._grid: List[List[Card]] = []
+        idx = 0
+        for r in range(rows):
+            row = []
+            for c in range(cols):
+                v = values[idx]
+                card = Card(v)
+                card.set_board_ref(self)   # link card -> board for change notifications
+                row.append(card)
+                idx += 1
+            self._grid.append(row)
+
+        # Per-player state
+        self._players: Dict[str, PlayerState] = {}
+
+        # FIFO async waiters per card position (for RULE 1-D contention)
+        self._waiters: Dict[Tuple[int, int], List[asyncio.Future]] = {}
+
+        self._change_count: int = 0
+        self._change_waiters: List[asyncio.Future] = []
+        
+        self.checkRep()
+
+    def checkRep(self):
+        """
+        Verifies all representation invariants hold.
+        
+        Requires: nothing
+        Effects: none (except assertion failures)
+        Ensures: all representation invariants are satisfied
+        """
+        # Basic dimensions
+        assert self._rows > 0 and self._cols > 0
+        
+        # Grid structure
+        assert len(self._grid) == self._rows
+        for row in self._grid:
+            assert len(row) == self._cols
+        
+        # Card states are valid
+        for r in range(self._rows):
+            for c in range(self._cols):
+                card = self._grid[r][c]
+                assert card.state in CardState
+                if card.state == CardState.REMOVED:
+                    assert card.controller is None
+
+    def __str__(self):
+        """
+        Returns informal string representation for debugging.
+        
+        Returns: multi-line string showing board contents
+        Effects: none (pure function)
+        """
+        rows = []
+        for r in range(self._rows):
+            row = " ".join(self._grid[r][c].value for c in range(self._cols))
+            rows.append(row)
+        return f"Board({self._rows}x{self._cols}):\n" + "\n".join(rows)
+
+    def toString(self) -> str:
+        """
+        Returns board in MIT format for client communication.
+        
+        Returns: string in format:
+            "RxC"
+            "token1"
+            "token2"
+            ...
+        where tokens are:
+            - "down" for face-down cards
+            - "none" for removed cards  
+            - "controller value" for face-up cards (e.g., "player1 A")
+            
+        Requires: nothing
+        Effects: none (pure function)
+        Ensures: return format matches MIT Memory Scramble protocol
+        """
+        lines = [f"{self._rows}x{self._cols}"]
+        for r in range(self._rows):
+            for c in range(self._cols):
+                card = self._grid[r][c]
+                if card.state == CardState.REMOVED:
+                    lines.append("none")
+                elif card.state == CardState.DOWN:
+                    lines.append("down") 
+                else:  # UP
+                    lines.append(f"{card.controller or 'none'} {card.value}")
+        return "\n".join(lines)
 
     @staticmethod
-    def parse_from_file(filename: str) -> Board:
+    async def parseFromFile(filename: str) -> "Board":
         """
-        Create a Board instance by parsing a board definition file.
+        Creates a Board by parsing a board configuration file.
+        
+        Parameters:
+            filename: path to board configuration file
+            
+        Returns: new Board instance
+        
+        Throws:
+            ValueError: if file format invalid or value count mismatch
+            FileNotFoundError: if file doesn't exist
+            IOError: if file cannot be read
+        
         Requires:
-          - filename is a valid path to an existing file
-          - File contains board data in one of supported formats:
-            * Matrix format: header "HxW" followed by H lines of W space-separated tokens
-            * Flat list format: header "HxW" followed by H*W tokens across any lines
-            * Compact format: header "HxW" followed by H*W concatenated characters
+            - filename refers to existing, readable file
+            - File format:
+                First line: "RxC" where R, C are positive integers
+                Next R lines: C space-separated string values
+            - Total values = R × C
+            
         Effects:
-          - Returns a new Board with all cards face-down and no controllers
-          - All cards have values parsed from the file
-          - Players dictionary is initialized empty
-          - Raises FileNotFoundError if file doesn't exist
-          - Raises ValueError for malformed file content or dimensions
+            - Reads and parses the file
+            - Returns new Board with dimensions and values from file
+            
+        Ensures:
+            - All cards initialize to CardState.DOWN
+            - Board representation invariants hold
         """
         path = Path(filename)
         if not path.exists():
-            raise FileNotFoundError(f"Board file not found: {filename}")
+            raise ValueError(f"File not found: {filename}")
 
-        raw = path.read_text(encoding="utf-8").strip().splitlines()
-        if not raw:
-            raise ValueError("Empty board file")
+        raw_lines = path.read_text(encoding="utf8").splitlines()
+        lines = [ln.strip() for ln in raw_lines if ln.strip()]
 
-        header = raw[0].strip().lower()
-        if "x" not in header:
-            raise ValueError(f"Invalid dimension line {raw[0]}")
-        h_str, w_str = header.split("x", 1)
-        try:
-            height, width = int(h_str), int(w_str)
-        except Exception:
-            raise ValueError(f"Invalid dimensions: {raw[0]}")
+        header = lines[0].lower().replace("x", " ")
+        parts = header.split()
+        if len(parts) != 2:
+            raise ValueError("Invalid header format")
 
-        body = [ln.strip() for ln in raw[1:] if ln.strip()]
+        rows, cols = map(int, parts)
+        values: List[str] = []
+        for line in lines[1:]:
+            values.extend(line.split())
 
-        # Strategy A: rows with space-separated tokens
-        if len(body) == height:
-            rows = [ln.split() for ln in body]
-            if all(len(r) == width for r in rows):
-                labels = rows
-            else:
-                labels = None
-        else:
-            labels = None
+        if len(values) != rows * cols:
+            raise ValueError("Board file values mismatch")
 
-        # Strategy B: flat list of tokens
-        if labels is None:
-            tokens: List[str] = []
-            for ln in body:
-                parts = ln.split()
-                tokens.extend(parts if parts else [])
-            if len(tokens) == width * height:
-                labels = [tokens[i * width:(i + 1) * width] for i in range(height)]
+        return Board(rows, cols, values)
 
-        # Strategy C: compact chars (no spaces)
-        if labels is None:
-            compact = "".join(body)
-            if len(compact) == width * height:
-                tokens = list(compact)
-                labels = [tokens[i * width:(i + 1) * width] for i in range(height)]
-
-        if labels is None:
-            sample = body[0] if body else "<no body>"
-            raise ValueError(
-                "Board file format not recognized. Need either:\n"
-                f" - {height} lines each with {width} space-separated tokens, or\n"
-                f" - A flat list of {height*width} tokens, or\n"
-                f" - {height*width} total characters.\n"
-                f"First body line was: {sample}"
-            )
-
-        grid: List[List[_Card]] = [
-            [_Card(value=v, state=CardState.DOWN, controller=None, last_controller=None) for v in row]
-            for row in labels
-        ]
-        return Board(width=width, height=height, grid=grid, players={})
-
-
-    def __str__(self) -> str:
+    def get_or_create_player(self, pid: str) -> PlayerState:
         """
-        Get human-readable string representation of board values.
+        Retrieves existing PlayerState or creates new one for player ID.
+        
+        Parameters:
+            pid: player identifier (non-empty string)
+            
+        Returns: PlayerState instance for the player
+        
+        Requires:
+            - pid is non-empty string
+            
+        Effects:
+            - If pid not in _players: creates new PlayerState and adds to _players
+            
+        Ensures:
+            - Same pid always returns same PlayerState instance
+            - _players[pid] exists after call
+        """
+        if pid not in self._players:
+            self._players[pid] = PlayerState()
+        return self._players[pid]
+
+    def iter_positions(self):
+        """
+        Iterates over all board positions.
+        
+        Returns: generator yielding (r, c, Card) tuples
+        
+        Requires: nothing
+        Effects: none (pure iteration)
+        
+        Rep Exposure: 
+            - Yields internal Card objects (safe for internal use only)
+            - Clients must not modify returned Cards
+        """
+        for r in range(self._rows):
+            for c in range(self._cols):
+                yield (r, c, self._grid[r][c])
+
+    def _validate_position(self, r: int, c: int):
+        """
+        Validates that (r,c) is within board bounds.
+        
+        Parameters:
+            r: row index
+            c: column index
+            
+        Throws:
+            ValueError: if position out of bounds
+            
+        Requires: nothing
+        Effects: none (except exception)
+        Ensures: if no exception, then 0 <= r < _rows and 0 <= c < _cols
+        """
+        if not (0 <= r < self._rows and 0 <= c < self._cols):
+            raise ValueError(f"Position ({r},{c}) out of bounds for {self._rows}x{self._cols} board")
+
+    async def wait_for_card(self, r: int, c: int):
+        """
+        Waits for a card to become available (FLIP Rule 1-D implementation).
+        
+        Parameters:
+            r: row index
+            c: column index  
+            
+        Returns: True when card becomes available
+        
+        Throws:
+            ValueError: if position invalid
+            
+        Requires:
+            - 0 <= r < _rows and 0 <= c < _cols
+            
+        Effects:
+            - Adds caller to FIFO wait queue for position (r,c)
+            - Suspends execution until card becomes available or is removed
+            
+        Ensures:
+            - Returns only when card is DOWN or REMOVED (available for flipping)
+            - Waiters are served in FIFO order
+        """
+        self.checkRep()
+        self._validate_position(r, c)
+        
+        fut = asyncio.Future()
+        self._waiters.setdefault((r, c), []).append(fut)
+        dbg_board(f"[WAIT] Added waiter for card ({r},{c}). Total now: {len(self._waiters[(r,c)])}")
+        
+        result = await fut
+        self.checkRep()
+        return result
+
+    def notify_card_available(self, r: int, c: int):
+        """
+        Notifies all waiters that a card has become available.
+        
+        Parameters:
+            r: row index
+            c: column index
+            
+        Throws:
+            ValueError: if position invalid
+            
+        Requires:
+            - 0 <= r < _rows and 0 <= c < _cols
+            
+        Effects:
+            - Resolves all Futures in _waiters[(r,c)] with True
+            - Clears the wait queue for (r,c)
+            - Calls notify_change() (triggers visual update)
+            
+        Ensures:
+            - All waiters for (r,c) are notified
+            - Wait queue for (r,c) is empty after call
+        """
+        self.checkRep()
+        self._validate_position(r, c)
+        
+        queue = self._waiters.get((r, c))
+        if not queue:
+            self.checkRep()
+            return
+
+        dbg_board(f"[NOTIFY] Card ({r},{c}) available. Releasing {len(queue)} waiter(s).")
+        # Empty the queue
+        self._waiters[(r, c)] = []
+        for fut in queue:
+            if not fut.done():
+                fut.set_result(True)
+
+        # Visual change
+        self.notify_change()
+        self.checkRep()
+
+    def notify_change(self):
+        """
+        Notifies all watchers of visual state changes.
+        
+        Requires: nothing
         
         Effects:
-          - Returns string with format:
-            "heightxwidth"
-            "value1 value2 ..."
-            "value3 value4 ..."
-            ...
-          - Only shows card values, not states or controllers
-          - Does not modify board state
+            - Increments _change_count by 1
+            - Resolves all Futures in _change_waiters with new _change_count
+            - Clears _change_waiters
+            
+        Ensures:
+            - _change_count increases monotonically
+            - All waiting watch() calls resume with updated count
         """
-        rows = [" ".join(card.value for card in row) for row in self._grid]
-        return f"{self.height}x{self.width}\n" + "\n".join(rows)
+        self._change_count += 1
+        dbg_board(f"[CHANGE] change_count -> {self._change_count}")
 
-    def get_card(self, row: int, col: int) -> _Card:
-        """Return reference to the card at (row, col)."""
-        if 0 <= row < self.height and 0 <= col < self.width:
-            return self._grid[row][col]
-        raise IndexError(f"Position ({row}, {col}) out of bounds")
+        # Wake all waiting watch calls
+        if self._change_waiters:
+            waiters = self._change_waiters.copy()
+            self._change_waiters.clear()
 
-    def set_card(self, row: int, col: int, card: _Card) -> None:
-        """Replace the card at (row, col)."""
-        if 0 <= row < self.height and 0 <= col < self.width:
-            self._grid[row][col] = card
-        else:
-            raise IndexError(f"Position ({row}, {col}) out of bounds")
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_result(self._change_count)
 
-    def dump(self) -> str:
-        """Return text view of values, states, and controllers."""
-        lines = []
-        for row in self._grid:
-            line = [f"{c.value}({c.state.name},{c.controller or '-'})" for c in row]
-            lines.append(" ".join(line))
+    async def wait_for_change(self) -> int:
+        """
+        Waits for the next visual change to the board.
+        
+        Returns: new _change_count after change occurs
+        
+        Throws:
+            asyncio.CancelledError: if task is cancelled while waiting
+            
+        Requires: nothing
+        
+        Effects:
+            - Adds Future to _change_waiters
+            - Suspends execution until notify_change() is called
+            
+        Ensures:
+            - Returns only after at least one visual change occurs
+            - Return value > value at time of call
+        """
+        self.checkRep()
+
+        fut = asyncio.Future()
+        self._change_waiters.append(fut)
+        dbg_board(f"[WATCH-WAIT] Added watch waiter. Total now: {len(self._change_waiters)}")
+
+        try:
+            await fut
+            dbg_board(f"[WATCH-WAIT] Resumed watcher. change_count={self._change_count}")
+            self.checkRep()
+            return self._change_count
+        except asyncio.CancelledError:
+            if fut in self._change_waiters:
+                self._change_waiters.remove(fut)
+            self.checkRep()
+            raise
+
+    def set_card_state(self, r: int, c: int, state: CardState):
+        """
+        Sets the visibility state of a card.
+        
+        Parameters:
+            r: row index
+            c: column index
+            state: new CardState value
+            
+        Throws:
+            ValueError: if position invalid
+            
+        Requires:
+            - 0 <= r < _rows and 0 <= c < _cols
+            - state is valid CardState value
+            
+        Effects:
+            - Updates card.state to new value
+            - If state == REMOVED: calls notify_card_available(r, c)
+            - Triggers visual change notification
+            
+        Ensures:
+            - card.state == state after call
+            - If state changed, visual observers are notified
+        """
+        self.checkRep()
+        self._validate_position(r, c)
+        
+        card = self._grid[r][c]
+        old_state = card.state
+
+        if old_state != state:
+            dbg_board(f"[STATE] ({r},{c}) {old_state} -> {state}")
+            card.state = state  # Card itself will notify_change through _notify_board()
+
+            # Wake the ones from a queue 
+            if state == CardState.REMOVED:
+                self.notify_card_available(r, c)
+                
+        self.checkRep()
+
+    def set_card_controller(self, r: int, c: int, controller: Optional[str]):
+        """
+        Sets the controller of a card.
+        
+        Parameters:
+            r: row index
+            c: column index  
+            controller: player ID or None to release control
+            
+        Throws:
+            ValueError: if position invalid
+            
+        Requires:
+            - 0 <= r < _rows and 0 <= c < _cols
+            - controller is None or non-empty string
+            
+        Effects:
+            - Updates card.controller
+            - If controller changes from non-None to None: calls notify_card_available(r, c)
+            - Triggers visual change notification
+            
+        Ensures:
+            - card.controller == controller after call
+            - If controller released, waiters are notified
+        """
+        self.checkRep()
+        self._validate_position(r, c)
+        
+        card = self._grid[r][c]
+        old_controller = card.controller
+
+        if old_controller != controller:
+            dbg_board(f"[CTRL] ({r},{c}) controller {old_controller} -> {controller}")
+            card.controller = controller  # Visually notify
+
+            if old_controller is not None and controller is None:
+                self.notify_card_available(r, c)
+                
+        self.checkRep()
+
+    def set_card_value(self, r: int, c: int, value: str):
+        """
+        Sets the value of a card.
+        
+        Parameters:
+            r: row index
+            c: column index
+            value: new card value
+            
+        Throws:
+            ValueError: if position invalid or value empty
+            
+        Requires:
+            - 0 <= r < _rows and 0 <= c < _cols  
+            - value is non-empty string
+            
+        Effects:
+            - Updates card.value
+            - Triggers visual change notification
+            
+        Ensures:
+            - card.value == value after call
+            - Visual observers are notified of change
+        """
+        self.checkRep()
+        self._validate_position(r, c)
+        
+        card = self._grid[r][c]
+        old_val = card.value
+        if old_val != value:
+            dbg_board(f"[VALUE] ({r},{c}) {old_val} -> {value}")
+            card.value = value  # Card notifies the board
+            
+        self.checkRep()
+
+    def format_for_player_view(self, player_id: str, view: List[List[str]]) -> str:
+        """
+        Formats a player's view into MIT protocol format.
+        
+        Parameters:
+            player_id: player identifier (for potential per-player formatting)
+            view: 2D list of visibility tokens from look() operation
+            
+        Returns: string in MIT board format
+        
+        Requires:
+            - view is fresh 2D list with dimensions _rows × _cols
+            - Each view[r][c] is valid token: "down", "none", or controller string
+            
+        Effects: none (pure function)
+        
+        Ensures:
+            - Return format matches MIT protocol specification
+            - Cards with tokens "down" or "none" output as-is
+            - Cards with controller tokens output as "controller value"
+        """
+        self.checkRep()
+        
+        lines = [f"{self._rows}x{self._cols}"]
+        for r in range(self._rows):
+            for c in range(self._cols):
+                token = view[r][c]
+                card = self._grid[r][c]
+                if token in ("down", "none"):
+                    lines.append(token)
+                else:
+                    lines.append(f"{token} {card.value}")
+                    
+        self.checkRep()
         return "\n".join(lines)
-
-    def get_grid_copy(self) -> List[List[_Card]]:
-        """Return a deep copy of the grid for inspection."""
-        return [
-            [
-                _Card(
-                    value=card.value,
-                    state=card.state,
-                    controller=card.controller,
-                    last_controller=card.last_controller
-                )
-                for card in row
-            ]
-            for row in self._grid
-        ]
-
-    def get_players_copy(self) -> Dict[str, List[Tuple[int, int]]]:
-        """Return a copy of the players dictionary."""
-        return {pid: positions[:] for pid, positions in self._players.items()}
-
-    def get_pending_copy(self) -> Dict[str, Tuple[List[Tuple[int, int]], bool]]:
-        """Return a copy of the pending dictionary."""
-        return {pid: (positions[:], matched) for pid, (positions, matched) in self._pending.items()}
