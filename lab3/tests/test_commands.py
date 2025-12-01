@@ -43,15 +43,15 @@ class TestBoardOps:
             Test correct behaviour for the *first flip* of a round.
 
         EXPECTED:
-            • Flip succeeds
-            • Card becomes UP
-            • Controller assigned to flipping player
-            • Player auto-created if missing
+             Flip succeeds
+             Card becomes UP
+             Controller assigned to flipping player
+             Player auto-created if missing
 
         VERIFICATION:
-            • Check flip result is "success"
-            • Verify player sees card as "my" via look operation
-            • Verify other players see card as "up"
+             Check flip result is "success"
+             Verify player sees card as "my" via look operation
+             Verify other players see card as "up"
         """
         board = Board(2, 2, ["A", "B", "C", "D"])
 
@@ -77,12 +77,12 @@ class TestBoardOps:
             Must return "fail".
 
         VERIFICATION:
-            • Check flip result is "fail"
-            • Verify board state unchanged via look operation
+             Check flip result is "fail"
+             Verify board state unchanged via look operation
         """
         board = Board(2, 2, ["A", "B", "C", "D"])
         
-        # Set up REMOVED card using public API
+        # Set up REMOVED card using public helper
         board.set_card_state(0, 0, CardState.REMOVED)
 
         # Get initial state
@@ -105,8 +105,8 @@ class TestBoardOps:
             Previously nonexistent player can successfully flip cards.
 
         VERIFICATION:
-            • Check flip result is "success" for new player
-            • Verify new player can control cards via look operation
+             Check flip result is "success" for new player
+             Verify new player can control cards via look operation
         """
         board = Board(2, 2, ["A", "B", "C", "D"])
 
@@ -128,8 +128,8 @@ class TestBoardOps:
             Flip (5,5) on a 2x2 board → invalid → must return "fail".
 
         VERIFICATION:
-            • Check flip result is "fail" for invalid coordinates
-            • Verify board state unchanged via look operation
+             Check flip result is "fail" for invalid coordinates
+             Verify board state unchanged via look operation
         """
         board = Board(2, 2, ["A", "B", "C", "D"])
 
@@ -163,8 +163,8 @@ class TestCommands:
             look() returns a standard board view (simple delegation).
 
         VERIFICATION:
-            • Check return type is list
-            • Check dimensions match board size
+             Check return type is list
+             Check dimensions match board size
         """
         board = Board(2, 2, ["A", "B", "C", "D"])
         view = await look(board, "test_player")
@@ -181,7 +181,7 @@ class TestCommands:
                 "success", "fail", or "wait"
 
         VERIFICATION:
-            • Check return value is valid status string
+             Check return value is valid status string
         """
         board = Board(2, 2, ["A", "B", "C", "D"])
 
@@ -202,12 +202,12 @@ async def test_integration():
         (Same pattern as ab.txt-style minimal boards)
 
     EXPECTED:
-        • look() produces a 2x2 view
-        • flip() produces valid statuses
+         look() produces a 2x2 view
+         flip() produces valid statuses
 
     VERIFICATION:
-        • Check look() returns correct dimensions
-        • Check flip() returns valid status
+         Check look() returns correct dimensions
+         Check flip() returns valid status
     """
     print("\nTesting integration between commands and BoardOps...")
 

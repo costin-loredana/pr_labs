@@ -17,10 +17,10 @@ class TestMapFunctionality:
             A C
 
         This board is used throughout the suite to test:
-            – basic map()
-            – pair consistency ("A" appears twice)
-            – interleaving with flip()
-            – failure cases
+             basic map()
+             pair consistency ("A" appears twice)
+             interleaving with flip()
+             failure cases
         """
         values = ["A", "B", "A", "C"]
         return Board(2, 2, values)
@@ -358,8 +358,8 @@ class TestMapEdgeCases:
     """
     PURPOSE:
         Validate corner cases:
-            – single-card boards
-            – all-removed boards
+             single-card boards
+             all-removed boards
     """
 
     @pytest.mark.asyncio

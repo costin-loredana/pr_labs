@@ -64,10 +64,10 @@ class TestGameRulesScenarios:
         
         # Verify through public look operations
         p1_view = await BoardOps.look(board, "p1")
-        assert p1_view[0][0] == "my"  # Player sees controlled card as "my"
+        assert p1_view[0][0] == "my" 
         
         p2_view = await BoardOps.look(board, "p2")
-        assert p2_view[0][0] == "up"  # Others see it as "up"
+        assert p2_view[0][0] == "up" 
 
     @pytest.mark.asyncio
     async def test_rule_1c_up_uncontrolled_card(self) -> None:
@@ -89,8 +89,8 @@ class TestGameRulesScenarios:
         board = Board(2, 2, ["A", "B", "A", "B"])
         
         # First, flip a card to UP state
-        await BoardOps.flip(board, "p2", 0, 0)  # p2 flips it
-        await BoardOps.flip(board, "p2", 0, 1)  # p2 flips another (no match)
+        await BoardOps.flip(board, "p2", 0, 0)  
+        await BoardOps.flip(board, "p2", 0, 1)  
         # After non-match, card at (0,0) should be UP but uncontrolled
         
         # Now p1 tries to flip the UP uncontrolled card
@@ -144,7 +144,6 @@ class TestGameRulesScenarios:
             - Check second flip result is "fail"
             - Verify first card no longer shows as "my" to player
         """
-        # Since we can't create REMOVED cards without internal access,
         # we'll test the control release behavior with Rule 2-B instead
         # which has the same control release mechanism
         board = Board(2, 2, ["A", "B", "A", "B"])
@@ -195,7 +194,7 @@ class TestGameRulesScenarios:
         
         # Verify first control released
         view = await BoardOps.look(board, "p1")
-        assert view[0][0] == "up"  # No longer "my"
+        assert view[0][0] == "up" 
 
     @pytest.mark.asyncio
     async def test_rule_2c_second_card_down_flips_up(self) -> None:
@@ -225,7 +224,7 @@ class TestGameRulesScenarios:
         assert result == "success"
         
         # Verify second card is now UP via look
-        view = await BoardOps.look(board, "p2")  # Other player's perspective
+        view = await BoardOps.look(board, "p2")  
         assert view[0][1] == "up"  # Second card should be visible as "up"
 
     @pytest.mark.asyncio

@@ -338,13 +338,17 @@ class Board:
         if not queue:
             self.checkRep()
             return
-
-        dbg_board(f"[NOTIFY] Card ({r},{c}) available. Releasing {len(queue)} waiter(s).")
+        fut = queue.pop(0)
+        dbg_board(f"[NOTIFY] Card ({r},{c}) available. Releasing 1 waiter (FIFO). Remaining={len(queue)}")
+        #dbg_board(f"[NOTIFY] Card ({r},{c}) available. Releasing {len(queue)} waiter(s).")
         # Empty the queue
-        self._waiters[(r, c)] = []
-        for fut in queue:
-            if not fut.done():
-                fut.set_result(True)
+        if not fut.done():
+            fut.set_result(True)
+
+        self._waiters[(r, c)] = queue
+        #for fut in queue:
+            #if not fut.done():
+             #   fut.set_result(True)
 
         # Visual change
         self.notify_change()

@@ -1,0 +1,76 @@
+version: "3.8"
+
+services:
+  kv-leader:
+    build: .
+    container_name: kv-leader
+    environment:
+      WRITE_QUORUM: "${WRITE_QUORUM:-5}"
+      FOLLOWERS: "http://kv-follower1:8000,http://kv-follower2:8000,http://kv-follower3:8000,http://kv-follower4:8000,http://kv-follower5:8000"
+      MIN_DELAY_MS: "${MIN_DELAY_MS:-0}"
+      MAX_DELAY_MS: "${MAX_DELAY_MS:-1000}"
+      REPLICATION_TIMEOUT: "5.0"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - kv-follower1
+      - kv-follower2
+      - kv-follower3
+      - kv-follower4
+      - kv-follower5
+    command: ["uvicorn", "leader:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  kv-follower1:
+    build: .
+    container_name: kv-follower1
+    environment:
+      FOLLOWER_ID: "1"
+    expose:
+      - "8000"
+    ports:
+      - "8001:8000"
+    command: ["uvicorn", "follower:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  kv-follower2:
+    build: .
+    container_name: kv-follower2
+    environment:
+      FOLLOWER_ID: "2"
+    expose:
+      - "8000"
+    ports:
+      - "8002:8000"
+    command: ["uvicorn", "follower:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  kv-follower3:
+    build: .
+    container_name: kv-follower3
+    environment:
+      FOLLOWER_ID: "3"
+    expose:
+      - "8000"
+    ports:
+      - "8003:8000"
+    command: ["uvicorn", "follower:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  kv-follower4:
+    build: .
+    container_name: kv-follower4
+    environment:
+      FOLLOWER_ID: "4"
+    expose:
+      - "8000"
+    ports:
+      - "8004:8000"
+    command: ["uvicorn", "follower:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  kv-follower5:
+    build: .
+    container_name: kv-follower5
+    environment:
+      FOLLOWER_ID: "5"
+    expose:
+      - "8000"
+    ports:
+      - "8005:8000"
+    command: ["uvicorn", "follower:app", "--host", "0.0.0.0", "--port", "8000"]

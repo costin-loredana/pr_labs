@@ -114,7 +114,7 @@ async def test_wait_for_change_unblocks_on_notify():
 
     # The result should be a number indicating change count
     assert isinstance(result, int)
-    assert result >= 0  # Should be non-negative
+    assert result >= 0 
 
 @pytest.mark.asyncio
 async def test_set_card_state_changes_state_and_triggers_watch():

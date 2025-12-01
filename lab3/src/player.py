@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 class PlayerState:
     """
     A PlayerState tracks the transient flip selection state for one player
-    during their turn in the Memory Scramble game.
+    during their turn 
     
     ABSTRACTION FUNCTION (AF):
         AF(self) = a player's current turn state consisting of:
@@ -15,7 +15,7 @@ class PlayerState:
         - matched_pair: whether the two selected cards form a matching pair
     
     REPRESENTATION INVARIANTS (RI):
-        - If matched_pair == True, then first ≠ None and second ≠ None
+        - If matched_pair == True, then first is not None and second is not None
         - If second == None, then matched_pair == False
         - first and second are either None or valid (row, col) tuples
         - first and second are distinct positions when both are not None
